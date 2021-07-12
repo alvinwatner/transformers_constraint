@@ -785,28 +785,28 @@ class BartEncoder(BartPretrainedModel):
                 clues_embeds_per_batch = clues_embeds[batch].view(clue_seq_len * embed_size).unsqueeze(0)
                 input_seq_and_clues[batch, token] = torch.cat((wi, clues_embeds_per_batch), dim = 1).squeeze(0)
 
-        f_linear = nn.Linear(f_input_size, embed_size)
+        f_linear = nn.Linear(f_input_size, embed_size).to(self.device)
         # shape : (batch_size, input_seq_len, embed_size)
-        input_clues_embeds = f_linear(input_seq_and_clues)
+        input_clues_embeds = f_linear(input_seq_and_clues).to(self.device)
 
-        f_linear2 = nn.Linear(embed_size, clue_seq_len)
+        f_linear2 = nn.Linear(embed_size, clue_seq_len).to(self.device)
         # shape : (batch_size, input_seq_len, clues_seq_len)
-        clues_logits = f_linear2(input_clues_embeds)
+        clues_logits = f_linear2(input_clues_embeds).to(self.device)
 
-        f_softmax = nn.Softmax(dim = 2)
+        f_softmax = nn.Softmax(dim = 2).to(self.device)
         # shape : (batch_size, input_seq_len, clues_seq_len)
-        clues_probs = f_softmax(clues_logits)
+        clues_probs = f_softmax(clues_logits).to(self.device)
 
         # Step2
         # shape : (batch_size, clues_seq_len, input_seq_len)
-        clues_probs_transpose = torch.transpose(clues_probs, 2, 1)
+        clues_probs_transpose = torch.transpose(clues_probs, 2, 1).to(self.device)
         # shape : (batch_size, embed_size, clues_seq_len)
-        clue_embeds_transpose = torch.transpose(clues_embeds, 2, 1)
+        clue_embeds_transpose = torch.transpose(clues_embeds, 2, 1).to(self.device)
 
         # shape : (batch_size, embed_size, input_seq_len)
-        clues_embeds_hat = torch.bmm(clue_embeds_transpose, clues_probs_transpose)
+        clues_embeds_hat = torch.bmm(clue_embeds_transpose, clues_probs_transpose).to(self.device)
         # shape : (batch_size, input_seq_len, embed_size)
-        clues_embeds_hat = torch.transpose(clues_embeds_hat, 2, 1)
+        clues_embeds_hat = torch.transpose(clues_embeds_hat, 2, 1).to(self.device)
 
         #Step3
         embed_scale = embed_size ** (1/2)
@@ -815,10 +815,10 @@ class BartEncoder(BartPretrainedModel):
         # shape : (batch_size, input_seq_len, 1)
         inputs_clues_hat = inputs_clues_hat.unsqueeze(-1)
 
-        f2_linear = nn.Linear(1, 1)
+        f2_linear = nn.Linear(1, 1).to(self.device)
         # shape : (batch_size, input_seq_len, 1)
-        inputs_clues_logits = f2_linear(inputs_clues_hat)
-        inputs_clues_probs = torch.sigmoid(inputs_clues_logits)
+        inputs_clues_logits = f2_linear(inputs_clues_hat).to(self.device)
+        inputs_clues_probs = torch.sigmoid(inputs_clues_logits).to(self.device)
 
         #Step4
         # shape : (batch_size, input_seq_len, embed_size)
