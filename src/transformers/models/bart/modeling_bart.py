@@ -776,7 +776,7 @@ class BartEncoder(BartPretrainedModel):
 
         #Step1
         f_input_size = (clue_seq_len * embed_size) + embed_size
-        input_seq_and_clues = torch.zeros(batch_size, input_seq_len, f_input_size)
+        input_seq_and_clues = torch.zeros(batch_size, input_seq_len, f_input_size).to(self.device)
 
         #need to find more effective way than this
         for batch in range(batch_size):
@@ -831,7 +831,6 @@ class BartEncoder(BartPretrainedModel):
         embed_pos = self.embed_positions(input_shape)
 
         hidden_states = (inputs_embeds + clues_inputs_lcombination) + embed_pos
-        print("wkwkwkwkwkwkwkwkwkwkwkwkwkwkwkwkwkw")
 
         hidden_states = self.layernorm_embedding(hidden_states)
         hidden_states = F.dropout(hidden_states, p=self.dropout, training=self.training)
