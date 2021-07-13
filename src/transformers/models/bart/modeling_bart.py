@@ -1362,9 +1362,10 @@ class BartForConditionalGeneration(BartPretrainedModel):
                     labels, self.config.pad_token_id, self.config.decoder_start_token_id
                 )
 
+
         outputs = self.model(
-            input_ids,
-            clue_ids,
+            input_ids = input_ids,
+            clue_ids = clue_ids,
             attention_mask=attention_mask,
             decoder_input_ids=decoder_input_ids,
             encoder_outputs=encoder_outputs,
