@@ -680,19 +680,52 @@ class BartEncoder(BartPretrainedModel):
         else:
             self.embed_tokens = nn.Embedding(config.vocab_size, embed_dim, self.padding_idx)
 
-
         self.embed_positions = BartLearnedPositionalEmbedding(
             config.max_position_embeddings,
             embed_dim,
         )
+        self.softmax = nn.Softmax(dim = 2)
+        self.linear = nn.Linear(1,1)
         self.layers = nn.ModuleList([BartEncoderLayer(config) for _ in range(config.encoder_layers)])
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
 
         self.init_weights()
 
-    def clues_attn(self, input_ids):
-        clues_embeds = ""
-        return clues_embeds
+    def clues_attn(self, inputs_embeds, clues_embeds):
+        batch_size = inputs_embeds.size(0)
+        input_seq_len = inputs_embeds.size(1)
+        clue_seq_len = clues_embeds.size(1)
+
+        if clues_embeds.dtype != torch.float32:
+            clues_embeds = torch.tensor(clues_embeds, dtype=torch.float32)
+        if inputs_embeds.dtype != torch.float32:
+            inputs_embeds = torch.tensor(inputs_embeds, dtype=torch.float32)
+
+        # shape : (batch_size, clue_seq_len * input_seq_len, embed_size)
+        repeated_inputs_embeds = torch.repeat_interleave(inputs_embeds, clue_seq_len, dim=1)
+        repeated_clues_embeds = clues_embeds.repeat(1, input_seq_len, 1)
+
+        clues_scores = torch.sum(repeated_inputs_embeds * repeated_clues_embeds, dim=2)
+        clues_scores = clues_scores.view(batch_size, input_seq_len, clue_seq_len)
+        # shape : (batch_size, input_seq_len, clue_seq_len)
+        clues_scores = self.softmax(clues_scores)
+
+        # shape : (batch_size, input_seq_len, embed_size)
+        clues_embeds_hat = torch.bmm(clues_scores, clues_embeds)
+
+        inputs_clues_hat = torch.sum(inputs_embeds * clues_embeds_hat, dim=2) / self.embed_scale
+        inputs_clues_hat = inputs_clues_hat.unsqueeze(-1)
+
+        # shape : (batch_size, input_seq_len, 1)
+        inputs_clues_logits = self.linear(inputs_clues_hat)
+        inputs_clues_probs = torch.sigmoid(inputs_clues_logits)
+
+        discounted_clues_embeds_hat = inputs_clues_probs * clues_embeds_hat
+        discounted_input_embeds = (1 - inputs_clues_probs) * inputs_embeds
+
+        clues_inputs_lcombination = discounted_clues_embeds_hat + discounted_input_embeds
+
+        return clues_inputs_lcombination
 
     def forward(
         self,
@@ -762,71 +795,10 @@ class BartEncoder(BartPretrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids) * self.embed_scale
 
-        # shape : (batch_size, seq_len, embed_size)
+        # shape : (batch_size, clue_seq_len, embed_size)
         clues_embeds = self.embed_tokens(clue_ids)
 
-        batch_size = inputs_embeds.size(0)
-        input_seq_len = inputs_embeds.size(1)
-        clue_seq_len = clues_embeds.size(1)
-        embed_size = inputs_embeds.size(2)
-
-        '''The concatenation between each wi /subset in input_seq with the entire clue words.
-            Here, we are trying to build a relationship between each wi with the corresponding
-            clue words'''
-
-        #Step1
-        f_input_size = (clue_seq_len * embed_size) + embed_size
-        input_seq_and_clues = torch.zeros(batch_size, input_seq_len, f_input_size).to(self.device)
-
-        #need to find more effective way than this
-        for batch in range(batch_size):
-            for token in range(input_seq_len):
-                wi = inputs_embeds[batch, token].unsqueeze(0)
-                clues_embeds_per_batch = clues_embeds[batch].view(clue_seq_len * embed_size).unsqueeze(0)
-                input_seq_and_clues[batch, token] = torch.cat((wi, clues_embeds_per_batch), dim = 1).squeeze(0)
-
-        f_linear = nn.Linear(f_input_size, embed_size).to(self.device)
-        # shape : (batch_size, input_seq_len, embed_size)
-        input_clues_embeds = f_linear(input_seq_and_clues).to(self.device)
-
-        f_linear2 = nn.Linear(embed_size, clue_seq_len).to(self.device)
-        # shape : (batch_size, input_seq_len, clues_seq_len)
-        clues_logits = f_linear2(input_clues_embeds).to(self.device)
-
-        f_softmax = nn.Softmax(dim = 2).to(self.device)
-        # shape : (batch_size, input_seq_len, clues_seq_len)
-        clues_probs = f_softmax(clues_logits).to(self.device)
-
-        # Step2
-        # shape : (batch_size, clues_seq_len, input_seq_len)
-        clues_probs_transpose = torch.transpose(clues_probs, 2, 1).to(self.device)
-        # shape : (batch_size, embed_size, clues_seq_len)
-        clue_embeds_transpose = torch.transpose(clues_embeds, 2, 1).to(self.device)
-
-        # shape : (batch_size, embed_size, input_seq_len)
-        clues_embeds_hat = torch.bmm(clue_embeds_transpose, clues_probs_transpose).to(self.device)
-        # shape : (batch_size, input_seq_len, embed_size)
-        clues_embeds_hat = torch.transpose(clues_embeds_hat, 2, 1).to(self.device)
-
-        #Step3
-        embed_scale = embed_size ** (1/2)
-        # shape : (batch_size, input_seq_len)
-        inputs_clues_hat = torch.sum(inputs_embeds * clues_embeds_hat, dim = 2) / embed_scale
-        # shape : (batch_size, input_seq_len, 1)
-        inputs_clues_hat = inputs_clues_hat.unsqueeze(-1)
-
-        f2_linear = nn.Linear(1, 1).to(self.device)
-        # shape : (batch_size, input_seq_len, 1)
-        inputs_clues_logits = f2_linear(inputs_clues_hat).to(self.device)
-        inputs_clues_probs = torch.sigmoid(inputs_clues_logits).to(self.device)
-
-        #Step4
-        # shape : (batch_size, input_seq_len, embed_size)
-        discounted_clues_embeds_hat = inputs_clues_probs * clues_embeds_hat
-        discounted_input_embeds = (1 - inputs_clues_probs) * inputs_embeds
-
-        # shape : (batch_size, input_seq_len, embed_size)
-        clues_inputs_lcombination = discounted_clues_embeds_hat + discounted_input_embeds
+        clues_inputs_lcombination = self.clues_attn(inputs_embeds, clues_embeds)
 
         embed_pos = self.embed_positions(input_shape)
 
@@ -1361,7 +1333,6 @@ class BartForConditionalGeneration(BartPretrainedModel):
                 decoder_input_ids = shift_tokens_right(
                     labels, self.config.pad_token_id, self.config.decoder_start_token_id
                 )
-
 
         outputs = self.model(
             input_ids = input_ids,
