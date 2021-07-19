@@ -799,9 +799,7 @@ class BartEncoder(BartPretrainedModel):
 
         if clue_ids is None:
             hidden_states = inputs_embeds + embed_pos
-            print("yipii bum bum")
         else:
-            print("ikan mandi hujan")
             # shape : (batch_size, clue_seq_len, embed_size)
             clues_embeds = self.embed_tokens(clue_ids)
             clues_inputs_lcombination = self.clues_attn(inputs_embeds, clues_embeds)
