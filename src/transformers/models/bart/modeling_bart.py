@@ -795,12 +795,20 @@ class BartEncoder(BartPretrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids) * self.embed_scale
 
-        embed_pos = self.embed_positions(input_shape)
-
         # shape : (batch_size, clue_seq_len, embed_size)
         clues_embeds = self.embed_tokens(clue_ids)
+
         clues_inputs_lcombination = self.clues_attn(inputs_embeds, clues_embeds)
-        hidden_states = (inputs_embeds + clues_inputs_lcombination) + embed_pos
+
+        embed_pos = self.embed_positions(input_shape)
+
+        if clue_ids is None:
+            hidden_states = inputs_embeds + embed_pos
+        else:
+            # shape : (batch_size, clue_seq_len, embed_size)
+            clues_embeds = self.embed_tokens(clue_ids)
+            clues_inputs_lcombination = self.clues_attn(inputs_embeds, clues_embeds)
+            hidden_states = (inputs_embeds + clues_inputs_lcombination) + embed_pos
 
         hidden_states = self.layernorm_embedding(hidden_states)
         hidden_states = F.dropout(hidden_states, p=self.dropout, training=self.training)
