@@ -803,6 +803,8 @@ class BartEncoder(BartPretrainedModel):
             # shape : (batch_size, clue_seq_len, embed_size)
             clues_embeds = self.embed_tokens(clue_ids)
             clues_inputs_lcombination = self.clues_attn(inputs_embeds, clues_embeds)
+            print(f"input_embeds mean = {torch.mean(inputs_embeds)}")
+            print(f"clue_input_lcombination = {torch.mean(clues_inputs_lcombination)}")            
             hidden_states = (inputs_embeds + clues_inputs_lcombination) + embed_pos
 
         hidden_states = self.layernorm_embedding(hidden_states)
