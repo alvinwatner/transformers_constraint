@@ -723,9 +723,9 @@ class BartEncoder(BartPretrainedModel):
         discounted_clues_embeds_hat = inputs_clues_probs * clues_embeds_hat
         discounted_input_embeds = (1 - inputs_clues_probs) * inputs_embeds
 
-        clues_inputs_lcombination = discounted_clues_embeds_hat + discounted_input_embeds
+        alpha_embeds = discounted_clues_embeds_hat + discounted_input_embeds
 
-        return clues_inputs_lcombination
+        return alpha_embeds
 
     def forward(
         self,
@@ -798,12 +798,16 @@ class BartEncoder(BartPretrainedModel):
         embed_pos = self.embed_positions(input_shape)
 
         if clue_ids is None:
-            hidden_states = inputs_embeds + embed_pos  
+            hidden_states = inputs_embeds + embed_pos
+            print(f"input_embeds mean = {torch.mean(inputs_embeds)}")
         else:
             # shape : (batch_size, clue_seq_len, embed_size)
             clues_embeds = self.embed_tokens(clue_ids)
-            clues_inputs_lcombination = self.clues_attn(inputs_embeds, clues_embeds)
-            hidden_states = (inputs_embeds + clues_inputs_lcombination) + embed_pos
+            alpha_embeds = self.clues_attn(inputs_embeds, clues_embeds)
+            # print(f"input_embeds mean = {torch.mean(inputs_embeds)}")
+            # print(f"clue_input_lcombination = {torch.mean(alpha_embeds)}")
+            # print(f"embed_pos mean = {torch.mean(embed_pos)}")
+            hidden_states = (inputs_embeds + alpha_embeds) + embed_pos
 
         hidden_states = self.layernorm_embedding(hidden_states)
         hidden_states = F.dropout(hidden_states, p=self.dropout, training=self.training)
