@@ -209,8 +209,6 @@ class BartAttention(nn.Module):
 
         src_len = key_states.size(1)
         attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
-        print(f"attn_weights.shape : {attn_weights.shape}")
-        print(f"bsz : {bsz} ; self.num_heads : {self.num_heads} ; tgt_len : {tgt_len} ; src_len : {src_len}")
         assert attn_weights.size() == (
             bsz * self.num_heads,
             tgt_len,
@@ -237,7 +235,6 @@ class BartAttention(nn.Module):
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
         if output_attentions:
-            print("This will not get printed too during decoding")
             # this operation is a bit awkward, but it's required to
             # make sure that attn_weights keeps its gradient.
             # In order to do so, attn_weights have to reshaped
@@ -250,7 +247,6 @@ class BartAttention(nn.Module):
         attn_probs = F.dropout(attn_weights, p=self.dropout, training=self.training)
 
         attn_output = torch.bmm(attn_probs, value_states)
-        print(f"attn_output.shape : {attn_output.shape}")
         assert attn_output.size() == (
             bsz * self.num_heads,
             tgt_len,
@@ -263,11 +259,7 @@ class BartAttention(nn.Module):
             .reshape(bsz, tgt_len, embed_dim)
         )
 
-        print(f"attn_output_reshaped.shape : {attn_output.shape}")
-
         attn_output = self.out_proj(attn_output)
-        print(f"attn_output projected.shape : {attn_output.shape}")
-        print()
         return attn_output, attn_weights_reshaped, past_key_value
 
 
