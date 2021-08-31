@@ -209,7 +209,8 @@ class BartAttention(nn.Module):
 
         src_len = key_states.size(1)
         attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
-
+        print(f"attn_weights.shape : {attn_weights.shape}")
+        print(f"bsz : {bsz} ; self.num_heads : {self.num_heads} ; tgt_len : {tgt_len} ; src_len : {src_len}")
         assert attn_weights.size() == (
             bsz * self.num_heads,
             tgt_len,
@@ -236,7 +237,8 @@ class BartAttention(nn.Module):
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
         if output_attentions:
-            # this operation is a bit akward, but it's required to
+            print("This will not get printed too during decoding")
+            # this operation is a bit awkward, but it's required to
             # make sure that attn_weights keeps its gradient.
             # In order to do so, attn_weights have to reshaped
             # twice and have to be reused in the following
@@ -248,7 +250,7 @@ class BartAttention(nn.Module):
         attn_probs = F.dropout(attn_weights, p=self.dropout, training=self.training)
 
         attn_output = torch.bmm(attn_probs, value_states)
-
+        print(f"attn_output.shape : {attn_output.shape}")
         assert attn_output.size() == (
             bsz * self.num_heads,
             tgt_len,
@@ -261,8 +263,11 @@ class BartAttention(nn.Module):
             .reshape(bsz, tgt_len, embed_dim)
         )
 
-        attn_output = self.out_proj(attn_output)
+        print(f"attn_output_reshaped.shape : {attn_output.shape}")
 
+        attn_output = self.out_proj(attn_output)
+        print(f"attn_output projected.shape : {attn_output.shape}")
+        print()
         return attn_output, attn_weights_reshaped, past_key_value
 
 
@@ -283,9 +288,69 @@ class BartEncoderLayer(nn.Module):
         self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
 
+        self.snip_project = nn.Linear(1, 2)
+        self.softmax = nn.Softmax(dim=2)
+
+    def global_attn(self, inputs_embeds, clues_embeds):
+        batch_size = inputs_embeds.size(0)
+        input_seq_len = inputs_embeds.size(1)
+        clue_seq_len = clues_embeds.size(1)
+
+        if clues_embeds.dtype != torch.float32:
+            clues_embeds = torch.tensor(clues_embeds, dtype=torch.float32)
+        if inputs_embeds.dtype != torch.float32:
+            inputs_embeds = torch.tensor(inputs_embeds, dtype=torch.float32)
+
+        # shape : (batch_size, clue_seq_len * input_seq_len, embed_size)
+        repeated_inputs_embeds = torch.repeat_interleave(inputs_embeds, clue_seq_len, dim=1)
+        repeated_clues_embeds = clues_embeds.repeat(1, input_seq_len, 1)
+
+        clues_scores = torch.sum(repeated_inputs_embeds * repeated_clues_embeds, dim=2)
+        clues_scores = clues_scores.view(batch_size, input_seq_len, clue_seq_len)
+        # shape : (batch_size, input_seq_len, clue_seq_len)
+        clues_scores = self.softmax(clues_scores)
+
+        # shape : (batch_size, input_seq_len, embed_size)
+        alpha_embeds = torch.bmm(clues_scores, clues_embeds)
+
+        return alpha_embeds
+
+    def sniper_attn(self, local_attn_out, global_attn_out):
+        # shape : (batch_size, input_seq_len)
+        sniper_scores = torch.sum(local_attn_out * global_attn_out, dim=2)
+        # sniper_scores.shape : (batch_size, input_seq_len, 1)
+        sniper_scores = torch.unsqueeze(sniper_scores, -1)
+
+        # projected_sniper_scores.shape : (batch_size, input_seq_len, 2)
+        projected_sniper_scores = self.snip_project(sniper_scores)
+
+        # sniper_weights.shape : (batch_size, input_seq_len, 2)
+        sniper_weights = self.softmax(projected_sniper_scores)
+
+        # sniper_weight_0.shape : (batch_size, input_seq_len)
+        sniper_weights_0 = sniper_weights[:, :, 0]
+        # sniper_weight_0.shape : (batch_size, input_seq_len, 1)
+        sniper_weights_0 = torch.unsqueeze(sniper_weights_0, -1)
+
+        # sniper_weight_1.shape : (batch_size, input_seq_len)
+        sniper_weights_1 = sniper_weights[:, :, 1]
+        # sniper_weight_1.shape : (batch_size, input_seq_len, 1)
+        sniper_weights_1 = torch.unsqueeze(sniper_weights_1, -1)
+
+        # sniper_embeds_0.shape : (batch_size, input_seq_len, embed_size)
+        sniper_embeds_0 = local_attn_out * sniper_weights_0
+        # sniper_embeds_1.shape : (batch_size, input_seq_len, embed_size)
+        sniper_embeds_1 = global_attn_out * sniper_weights_1
+
+        # sniper_embeds.shape : (batch_size, input_seq_len, embed_size)
+        sniper_embeds = sniper_embeds_0 + sniper_embeds_1
+
+        return sniper_embeds
+
     def forward(
         self,
         hidden_states: torch.Tensor,
+        clues_embeds : torch.Tensor,
         attention_mask: torch.Tensor,
         layer_head_mask: torch.Tensor,
         output_attentions: bool = False,
@@ -302,12 +367,23 @@ class BartEncoderLayer(nn.Module):
                 returned tensors for more detail.
         """
         residual = hidden_states
+
         hidden_states, attn_weights, _ = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             layer_head_mask=layer_head_mask,
             output_attentions=output_attentions,
         )
+
+        if clues_embeds is not None:
+            #global_attn_out.shape : (bsz, src_len, embed_size)
+            global_attn_out = self.global_attn(hidden_states, clues_embeds)
+
+            local_attn_out = hidden_states
+
+            sniper_embeds = self.sniper_attn(local_attn_out, global_attn_out)
+            hidden_states = sniper_embeds
+
         hidden_states = F.dropout(hidden_states, p=self.dropout, training=self.training)
         hidden_states = residual + hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
@@ -330,7 +406,6 @@ class BartEncoderLayer(nn.Module):
 
         if output_attentions:
             outputs += (attn_weights,)
-
         return outputs
 
 
@@ -684,48 +759,11 @@ class BartEncoder(BartPretrainedModel):
             config.max_position_embeddings,
             embed_dim,
         )
-        self.softmax = nn.Softmax(dim = 2)
-        self.linear = nn.Linear(1,1)
         self.layers = nn.ModuleList([BartEncoderLayer(config) for _ in range(config.encoder_layers)])
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
 
         self.init_weights()
 
-    def clues_attn(self, inputs_embeds, clues_embeds):
-        batch_size = inputs_embeds.size(0)
-        input_seq_len = inputs_embeds.size(1)
-        clue_seq_len = clues_embeds.size(1)
-
-        if clues_embeds.dtype != torch.float32:
-            clues_embeds = torch.tensor(clues_embeds, dtype=torch.float32)
-        if inputs_embeds.dtype != torch.float32:
-            inputs_embeds = torch.tensor(inputs_embeds, dtype=torch.float32)
-
-        # shape : (batch_size, clue_seq_len * input_seq_len, embed_size)
-        repeated_inputs_embeds = torch.repeat_interleave(inputs_embeds, clue_seq_len, dim=1)
-        repeated_clues_embeds = clues_embeds.repeat(1, input_seq_len, 1)
-
-        clues_scores = torch.sum(repeated_inputs_embeds * repeated_clues_embeds, dim=2)
-        clues_scores = clues_scores.view(batch_size, input_seq_len, clue_seq_len)
-        # shape : (batch_size, input_seq_len, clue_seq_len)
-        clues_scores = self.softmax(clues_scores)
-
-        # shape : (batch_size, input_seq_len, embed_size)
-        clues_embeds_hat = torch.bmm(clues_scores, clues_embeds)
-
-        inputs_clues_hat = torch.sum(inputs_embeds * clues_embeds_hat, dim=2) / self.embed_scale
-        inputs_clues_hat = inputs_clues_hat.unsqueeze(-1)
-
-        # shape : (batch_size, input_seq_len, 1)
-        inputs_clues_logits = self.linear(inputs_clues_hat)
-        inputs_clues_probs = torch.sigmoid(inputs_clues_logits)
-
-        discounted_clues_embeds_hat = inputs_clues_probs * clues_embeds_hat
-        discounted_input_embeds = (1 - inputs_clues_probs) * inputs_embeds
-
-        alpha_embeds = discounted_clues_embeds_hat + discounted_input_embeds
-
-        return alpha_embeds
 
     def forward(
         self,
@@ -796,18 +834,22 @@ class BartEncoder(BartPretrainedModel):
             inputs_embeds = self.embed_tokens(input_ids) * self.embed_scale
 
         embed_pos = self.embed_positions(input_shape)
+        hidden_states = inputs_embeds + embed_pos
 
-        if clue_ids is None:
-            hidden_states = inputs_embeds + embed_pos
-            print(f"input_embeds mean = {torch.mean(inputs_embeds)}")
-        else:
-            # shape : (batch_size, clue_seq_len, embed_size)
-            clues_embeds = self.embed_tokens(clue_ids)
-            alpha_embeds = self.clues_attn(inputs_embeds, clues_embeds)
-            # print(f"input_embeds mean = {torch.mean(inputs_embeds)}")
-            # print(f"clue_input_lcombination = {torch.mean(alpha_embeds)}")
-            # print(f"embed_pos mean = {torch.mean(embed_pos)}")
-            hidden_states = (inputs_embeds + alpha_embeds) + embed_pos
+        # shape : (batch_size, clue_seq_len, embed_size)
+        clues_embeds = self.embed_tokens(clue_ids)
+
+        # if clue_ids is None:
+        #     hidden_states = inputs_embeds + embed_pos
+        #     print(f"input_embeds mean = {torch.mean(inputs_embeds)}")
+        # else:
+        #     # shape : (batch_size, clue_seq_len, embed_size)
+        #     clues_embeds = self.embed_tokens(clue_ids)
+        #     alpha_embeds = self.clues_attn(inputs_embeds, clues_embeds)
+        #     # print(f"input_embeds mean = {torch.mean(inputs_embeds)}")
+        #     # print(f"clue_input_lcombination = {torch.mean(alpha_embeds)}")
+        #     # print(f"embed_pos mean = {torch.mean(embed_pos)}")
+        #     hidden_states = (inputs_embeds + alpha_embeds) + embed_pos
 
         hidden_states = self.layernorm_embedding(hidden_states)
         hidden_states = F.dropout(hidden_states, p=self.dropout, training=self.training)
@@ -826,6 +868,7 @@ class BartEncoder(BartPretrainedModel):
                 len(self.layers)
             ), f"The head_mask should be specified for {len(self.layers)} layers, but it is for {head_mask.size()[0]}."
         for idx, encoder_layer in enumerate(self.layers):
+
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
@@ -844,12 +887,14 @@ class BartEncoder(BartPretrainedModel):
                     layer_outputs = torch.utils.checkpoint.checkpoint(
                         create_custom_forward(encoder_layer),
                         hidden_states,
+                        clues_embeds,
                         attention_mask,
                         (head_mask[idx] if head_mask is not None else None),
                     )
                 else:
                     layer_outputs = encoder_layer(
                         hidden_states,
+                        clues_embeds,
                         attention_mask,
                         layer_head_mask=(head_mask[idx] if head_mask is not None else None),
                         output_attentions=output_attentions,
@@ -868,7 +913,6 @@ class BartEncoder(BartPretrainedModel):
         return BaseModelOutput(
             last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions
         )
-
 
 class BartDecoder(BartPretrainedModel):
     """
