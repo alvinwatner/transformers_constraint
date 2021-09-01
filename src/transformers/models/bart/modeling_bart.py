@@ -308,6 +308,7 @@ class BartEncoderLayer(nn.Module):
         return alpha_embeds
 
     def sniper_attn(self, local_attn_out, global_attn_out):
+    	print("ohh yeah baby")
         # shape : (batch_size, input_seq_len)
         sniper_scores = torch.sum(local_attn_out * global_attn_out, dim=2)
         # sniper_scores.shape : (batch_size, input_seq_len, 1)
